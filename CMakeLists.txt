@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18.4)
 # or use: /opt/devkitpro/portlibs/switch/bin/aarch64-none-elf-cmake
 include(/opt/devkitpro/cmake/Switch.cmake)
-project(usblink VERSION 0.0.1 LANGUAGES C CXX)
+project(usblink VERSION 0.0.2 LANGUAGES C CXX)
 set(PROJECT_AUTHOR "scturtle")
 
 if(NOT CMAKE_BUILD_TYPE)

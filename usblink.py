@@ -38,10 +38,10 @@ def main(fn):
         return
     filename = fn.name.encode('utf-8')
     # send length of filename
-    epout.write(struct.pack('IIII', MAGIC, 1, 0, len(filename)))
+    epout.write(struct.pack('IIII', MAGIC, 1, 0, len(filename)), timeout=0)
     wait_ack()
     # send filename
-    epout.write(filename)
+    epout.write(filename, timeout=0)
     wait_ack()
     # loop
     tot = fn.stat().st_size
@@ -50,14 +50,14 @@ def main(fn):
     while True:
         # send range
         bs = f.read(CHUNKSIZE)
-        epout.write(struct.pack('IIII', MAGIC, 2, pos, pos + len(bs)))
-        print(f'send range {pos} {pos + len(bs)}')
+        epout.write(struct.pack('IIII', MAGIC, 2, pos, pos + len(bs)), timeout=0)
+        print(f'send range {pos}-{pos + len(bs)}')
         wait_ack()
         if pos == tot:
             break
-        pos += tot
+        pos += len(bs)
         # send data
-        epout.write(bs)
+        epout.write(bs, timeout=0)
         wait_ack()
     f.close()
     print('done')
