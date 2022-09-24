@@ -122,7 +122,7 @@ static Result usbCommsInitializeEx(u32 num_interfaces) {
   return rc;
 }
 
-Result custom_usbCommsInitialize(void) { return usbCommsInitializeEx(1); }
+Result custom_usbCommsInitialize() { return usbCommsInitializeEx(1); }
 
 static void _usbCommsInterfaceFree(usbCommsInterface *interface) {
   if (!interface->initialized)
@@ -133,7 +133,7 @@ static void _usbCommsInterfaceFree(usbCommsInterface *interface) {
   interface->interface = NULL;
 }
 
-void custom_usbCommsExit(void) {
+void custom_usbCommsExit() {
   usbDsExit();
   g_usbCommsInitialized = false;
   for (u32 i = 0; i < TOTAL_INTERFACES; i++)
@@ -278,17 +278,22 @@ static Result _usbCommsInterfaceInit5x(u32 intf_ind) {
   return rc;
 }
 
-static Result _usbCommsRead(usbCommsInterface *interface, void *buffer,
-                            size_t size, size_t *transferredSize, u64 timeout) {
+enum UsbCommsDirection {
+  USB_COMMS_READ,
+  USB_COMMS_WRITE,
+};
+
+static Result _usbCommsTransfer(UsbDsEndpoint *ep, void *buffer, size_t size,
+                                size_t *transferredSize, u64 timeout) {
   Result rc = 0;
   u32 urbId = 0;
   u8 *bufptr = (u8 *)buffer;
-  u8 *transfer_buffer = NULL;
-  u8 transfer_type = 0;
-  u32 chunksize = 0;
-  u32 tmp_transferredSize = 0;
+  u32 tmp_size = 0;
   size_t total_transferredSize = 0;
   UsbDsReportData reportdata;
+
+  if (((u64)bufptr) & 0xfff)
+    return LibnxError_ShouldNotHappen;
 
   // Makes sure endpoints are ready for data-transfer / wait for init if needed.
   rc = usbDsWaitReady(timeout);
@@ -296,48 +301,38 @@ static Result _usbCommsRead(usbCommsInterface *interface, void *buffer,
     return rc;
 
   while (size) {
-    if (((u64)bufptr) & 0xfff)
-      return LibnxError_ShouldNotHappen;
-
-    transfer_buffer = bufptr;
-    chunksize = size;
-    transfer_type = 1;
-
     // Start a host->device transfer.
-    rc = usbDsEndpoint_PostBufferAsync(interface->endpoint_out, transfer_buffer,
-                                       chunksize, &urbId);
+    rc = usbDsEndpoint_PostBufferAsync(ep, bufptr, size, &urbId);
     if (R_FAILED(rc))
       return rc;
 
     // Wait for the transfer to finish.
-    rc = eventWait(&interface->endpoint_out->CompletionEvent, timeout);
+    rc = eventWait(&ep->CompletionEvent, timeout);
     // timeout
     if (R_FAILED(rc)) {
-      usbDsEndpoint_Cancel(interface->endpoint_out);
-      eventWait(&interface->endpoint_out->CompletionEvent, UINT64_MAX);
-      eventClear(&interface->endpoint_out->CompletionEvent);
+      usbDsEndpoint_Cancel(ep);
+      eventWait(&ep->CompletionEvent, UINT64_MAX);
+      eventClear(&ep->CompletionEvent);
       return rc;
     }
-    eventClear(&interface->endpoint_out->CompletionEvent);
+    eventClear(&ep->CompletionEvent);
 
-    rc = usbDsEndpoint_GetReportData(interface->endpoint_out, &reportdata);
+    rc = usbDsEndpoint_GetReportData(ep, &reportdata);
     if (R_FAILED(rc))
       return rc;
 
-    rc = usbDsParseReportData(&reportdata, urbId, NULL, &tmp_transferredSize);
+    rc = usbDsParseReportData(&reportdata, urbId, nullptr, &tmp_size);
     if (R_FAILED(rc))
       return rc;
 
-    if (tmp_transferredSize > chunksize)
-      tmp_transferredSize = chunksize;
-    total_transferredSize += (size_t)tmp_transferredSize;
+    if (tmp_size > size)
+      tmp_size = size;
+    total_transferredSize += (size_t)tmp_size;
 
-    if (transfer_type == 0)
-      memcpy(bufptr, transfer_buffer, tmp_transferredSize);
-    bufptr += tmp_transferredSize;
-    size -= tmp_transferredSize;
+    bufptr += tmp_size;
+    size -= tmp_size;
 
-    if (tmp_transferredSize < chunksize)
+    if (tmp_size < size)
       break;
   }
 
@@ -347,111 +342,27 @@ static Result _usbCommsRead(usbCommsInterface *interface, void *buffer,
   return rc;
 }
 
-static Result _usbCommsWrite(usbCommsInterface *interface, const void *buffer,
-                             size_t size, size_t *transferredSize) {
-  Result rc = 0;
-  u32 urbId = 0;
-  u32 chunksize = 0;
-  u8 *bufptr = (u8 *)buffer;
-  u8 *transfer_buffer = NULL;
-  u32 tmp_transferredSize = 0;
-  size_t total_transferredSize = 0;
-  UsbDsReportData reportdata;
-
-  // Makes sure endpoints are ready for data-transfer / wait for init if needed.
-  rc = usbDsWaitReady(UINT64_MAX);
-  if (R_FAILED(rc))
-    return rc;
-
-  while (size) {
-    if (((u64)bufptr) & 0xfff)
-      return LibnxError_ShouldNotHappen;
-
-    transfer_buffer = bufptr;
-    chunksize = size;
-
-    // Start a device->host transfer.
-    rc = usbDsEndpoint_PostBufferAsync(interface->endpoint_in, transfer_buffer,
-                                       chunksize, &urbId);
-    if (R_FAILED(rc))
-      return rc;
-
-    // Wait for the transfer to finish.
-    eventWait(&interface->endpoint_in->CompletionEvent, UINT64_MAX);
-    eventClear(&interface->endpoint_in->CompletionEvent);
-
-    rc = usbDsEndpoint_GetReportData(interface->endpoint_in, &reportdata);
-    if (R_FAILED(rc))
-      return rc;
-
-    rc = usbDsParseReportData(&reportdata, urbId, NULL, &tmp_transferredSize);
-    if (R_FAILED(rc))
-      return rc;
-
-    if (tmp_transferredSize > chunksize)
-      tmp_transferredSize = chunksize;
-
-    total_transferredSize += (size_t)tmp_transferredSize;
-
-    bufptr += tmp_transferredSize;
-    size -= tmp_transferredSize;
-
-    if (tmp_transferredSize < chunksize)
-      break;
-  }
-
-  if (transferredSize)
-    *transferredSize = total_transferredSize;
-
-  return rc;
-}
-
-static size_t usbCommsReadEx(void *buffer, size_t size, u32 interface,
-                             u64 timeout) {
+static size_t usbCommsTransferEx(void *buffer, size_t size, u32 interface,
+                                 UsbCommsDirection dir, u64 timeout) {
   size_t transferredSize = 0;
   UsbState state;
-  Result rc;
+  Result rc, rc2;
   usbCommsInterface *inter = &g_usbCommsInterfaces[interface];
-  bool initialized;
-
-  if (interface >= TOTAL_INTERFACES)
-    return 0;
-
-  initialized = inter->initialized;
+  UsbDsEndpoint *ep =
+      dir == USB_COMMS_READ ? inter->endpoint_out : inter->endpoint_in;
+  bool initialized = inter->initialized;
   if (!initialized)
     return 0;
-
-  rc = _usbCommsRead(inter, buffer, size, &transferredSize, timeout);
-  if (R_SUCCEEDED(rc))
-    return transferredSize;
+  rc = _usbCommsTransfer(ep, buffer, size, &transferredSize, timeout);
+  if (R_FAILED(rc))
+    return 0;
   return transferredSize;
 }
 
 size_t custom_usbCommsRead(void *buffer, size_t size, u64 timeout) {
-  return usbCommsReadEx(buffer, size, 0, timeout);
+  return usbCommsTransferEx(buffer, size, 0, USB_COMMS_READ, timeout);
 }
 
-static size_t usbCommsWriteEx(const void *buffer, size_t size, u32 interface) {
-  size_t transferredSize = 0;
-  UsbState state;
-  Result rc;
-  usbCommsInterface *inter = &g_usbCommsInterfaces[interface];
-  bool initialized;
-
-  if (interface >= TOTAL_INTERFACES)
-    return 0;
-
-  initialized = inter->initialized;
-  if (!initialized)
-    return 0;
-
-  rc = _usbCommsWrite(&g_usbCommsInterfaces[interface], buffer, size,
-                      &transferredSize);
-  if (R_SUCCEEDED(rc))
-    return transferredSize;
-  return transferredSize;
-}
-
-size_t custom_usbCommsWrite(const void *buffer, size_t size) {
-  return usbCommsWriteEx(buffer, size, 0);
+size_t custom_usbCommsWrite(void *buffer, size_t size, u64 timeout) {
+  return usbCommsTransferEx(buffer, size, 0, USB_COMMS_WRITE, timeout);
 }
